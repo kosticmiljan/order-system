@@ -1,0 +1,135 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local OrderRemote = ReplicatedStorage:WaitForChild("NPCOrderEvent")
+
+--------------------------------------------------------------------------------
+-- UI CREATION (Programmatic Modern Minimalist UI)
+--------------------------------------------------------------------------------
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "CustomerOrderGui"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = playerGui
+
+local cardFrame = Instance.new("Frame")
+cardFrame.Name = "OrderCard"
+cardFrame.Size = UDim2.new(0, 220, 0, 140)
+cardFrame.Position = UDim2.new(1, 20, 0.5, -70) -- Out of screen initially
+cardFrame.AnchorPoint = Vector2.new(0, 0.5)
+cardFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+cardFrame.BackgroundTransparency = 0.05
+cardFrame.Parent = screenGui
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 12)
+corner.Parent = cardFrame
+
+local stroke = Instance.new("UIStroke")
+stroke.Color = Color3.fromRGB(45, 45, 45)
+stroke.Thickness = 1.5
+stroke.Parent = cardFrame
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size = UDim2.new(1, -24, 0, 25)
+titleLabel.Position = UDim2.new(0, 12, 0, 10)
+titleLabel.BackgroundTransparency = 1
+titleLabel.Font = Enum.Font.GothamBold
+titleLabel.Text = "ACTIVE ORDER"
+titleLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+titleLabel.TextSize = 11
+titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.Parent = cardFrame
+
+local customerLabel = Instance.new("TextLabel")
+customerLabel.Name = "CustomerLabel"
+customerLabel.Size = UDim2.new(1, -24, 0, 18)
+customerLabel.Position = UDim2.new(0, 12, 0, 30)
+customerLabel.BackgroundTransparency = 1
+customerLabel.Font = Enum.Font.Gotham
+customerLabel.Text = "Customer: Username"
+customerLabel.TextColor3 = Color3.fromRGB(120, 120, 120)
+customerLabel.TextSize = 12
+customerLabel.TextXAlignment = Enum.TextXAlignment.Left
+customerLabel.Parent = cardFrame
+
+local listContainer = Instance.new("Frame")
+listContainer.Name = "ListContainer"
+listContainer.Size = UDim2.new(1, -24, 0, 65)
+listContainer.Position = UDim2.new(0, 12, 0, 58)
+listContainer.BackgroundTransparency = 1
+listContainer.Parent = cardFrame
+
+local listLayout = Instance.new("UIListLayout")
+listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+listLayout.Padding = UDim.new(0, 6)
+listLayout.Parent = listContainer
+
+--------------------------------------------------------------------------------
+-- ANIMATION & LOGIC
+--------------------------------------------------------------------------------
+local function ShowUI(data)
+	-- Clear old items
+	for _, child in ipairs(listContainer:GetChildren()) do
+		if child:IsA("Frame") then child:Destroy() end
+	end
+
+	customerLabel.Text = "Customer: @" .. data.CustomerName
+
+	-- Render order items
+	for _, item in ipairs(data.OrderItems) do
+		local itemFrame = Instance.new("Frame")
+		itemFrame.Size = UDim2.new(1, 0, 0, 24)
+		itemFrame.BackgroundColor3 = Color3.fromRGB(28, 28, 28)
+		itemFrame.Parent = listContainer
+
+		local itemCorner = Instance.new("UICorner")
+		itemCorner.CornerRadius = UDim.new(0, 6)
+		itemCorner.Parent = itemFrame
+
+		local itemDot = Instance.new("Frame")
+		itemDot.Size = UDim2.new(0, 6, 0, 6)
+		itemDot.Position = UDim2.new(0, 10, 0.5, -3)
+		itemDot.BackgroundColor3 = Color3.fromRGB(255, 190, 60)
+		itemDot.Parent = itemFrame
+
+		local dotCorner = Instance.new("UICorner")
+		dotCorner.CornerRadius = UDim.new(1, 0)
+		dotCorner.Parent = itemDot
+
+		local itemText = Instance.new("TextLabel")
+		itemText.Size = UDim2.new(1, -28, 1, 0)
+		itemText.Position = UDim2.new(0, 22, 0, 0)
+		itemText.BackgroundTransparency = 1
+		itemText.Font = Enum.Font.GothamMedium
+		itemText.Text = item.Name
+		itemText.TextColor3 = Color3.fromRGB(240, 240, 240)
+		itemText.TextSize = 12
+		itemText.TextXAlignment = Enum.TextXAlignment.Left
+		itemText.Parent = itemFrame
+	end
+
+	-- Slide In Tween
+	local goalPos = UDim2.new(1, -230, 0.5, -70)
+	TweenService:Create(cardFrame, TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+		Position = goalPos
+	}):Play()
+end
+
+local function HideUI()
+	-- Slide Out Tween
+	local goalPos = UDim2.new(1, 20, 0.5, -70)
+	TweenService:Create(cardFrame, TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {
+		Position = goalPos
+	}):Play()
+end
+
+OrderRemote.OnClientEvent:Connect(function(action, data)
+	if action == "ShowOrder" then
+		ShowUI(data)
+	elseif action == "HideOrder" then
+		HideUI()
+	end
+end)
