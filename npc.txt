@@ -1,0 +1,398 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+local ChatService = game:GetService("Chat")
+local Workspace = game:GetService("Workspace")
+
+local MenuData = require(ReplicatedStorage:WaitForChild("MenuData"))
+
+--------------------------------------------------------------------------------
+-- CONFIGURATION & REMOTE SETUP
+--------------------------------------------------------------------------------
+local MIN_GROUP_RANK = 1 -- Minimum group rank needed to claim customers
+local ActiveClaims = {} -- Tracks active claims: [player] = npcModel
+
+local OrderRemote = ReplicatedStorage:FindFirstChild("NPCOrderEvent")
+if not OrderRemote then
+	OrderRemote = Instance.new("RemoteEvent")
+	OrderRemote.Name = "NPCOrderEvent"
+	OrderRemote.Parent = ReplicatedStorage
+end
+
+--------------------------------------------------------------------------------
+-- 1. GROUP MEMBER FETCHER
+--------------------------------------------------------------------------------
+local GroupMembersCache = {}
+local FallbackUserIds = {1, 2, 156, 1727376, 261, 161218, 4398187, 1255899470}
+
+local function FetchGroupMembers()
+	local success, result = pcall(function()
+		local url = "https://groups.roproxy.com/v1/groups/" .. tostring(MenuData.GroupInfo.GroupId) .. "/users?sortOrder=Asc&limit=100"
+		local response = HttpService:GetAsync(url)
+		return HttpService:JSONDecode(response)
+	end)
+
+	if success and result and result.data then
+		for _, memberData in ipairs(result.data) do
+			if memberData.user and memberData.user.userId then
+				table.insert(GroupMembersCache, memberData.user.userId)
+			end
+		end
+		print("[NPC System] Successfully loaded members from Group.")
+	else
+		warn("[NPC System] HTTP Service disabled or proxy failed. Using defaults.")
+		GroupMembersCache = FallbackUserIds
+	end
+end
+task.spawn(FetchGroupMembers)
+
+local function GetRandomGroupUserId()
+	if #GroupMembersCache == 0 then return FallbackUserIds[math.random(1, #FallbackUserIds)] end
+	return GroupMembersCache[math.random(1, #GroupMembersCache)]
+end
+
+--------------------------------------------------------------------------------
+-- 2. OVERHEAD GUI SETUP
+--------------------------------------------------------------------------------
+local function CreateOverheadUI(npcModel, username)
+	local head = npcModel:WaitForChild("Head", 5)
+	if not head then return nil end
+
+	local bbGui = Instance.new("BillboardGui")
+	bbGui.Name = "NPCOverhead"
+	bbGui.Size = UDim2.new(0, 120, 0, 35)
+	bbGui.StudsOffset = Vector3.new(0, 2.0, 0)
+	bbGui.AlwaysOnTop = true
+	bbGui.MaxDistance = 20
+	bbGui.Parent = head
+
+	local frame = Instance.new("Frame")
+	frame.Size = UDim2.new(1, 0, 1, 0)
+	frame.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+	frame.BackgroundTransparency = 0.2
+	frame.Parent = bbGui
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 6)
+	corner.Parent = frame
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(40, 40, 40)
+	stroke.Thickness = 1.5
+	stroke.Parent = frame
+
+	local nameLbl = Instance.new("TextLabel")
+	nameLbl.Size = UDim2.new(1, 0, 0.5, 0)
+	nameLbl.BackgroundTransparency = 1
+	nameLbl.Font = Enum.Font.GothamBold
+	nameLbl.Text = "@" .. username
+	nameLbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+	nameLbl.TextSize = 10
+	nameLbl.Parent = frame
+
+	local statusLbl = Instance.new("TextLabel")
+	statusLbl.Size = UDim2.new(1, 0, 0.5, 0)
+	statusLbl.Position = UDim2.new(0, 0, 0.5, 0)
+	statusLbl.BackgroundTransparency = 1
+	statusLbl.Font = Enum.Font.Gotham
+	statusLbl.Text = "Waiting for Cashier..."
+	statusLbl.TextColor3 = Color3.fromRGB(255, 200, 50)
+	statusLbl.TextSize = 9
+	statusLbl.Parent = frame
+
+	return statusLbl
+end
+
+--------------------------------------------------------------------------------
+-- 3. MOVEMENT & PATHFINDING
+--------------------------------------------------------------------------------
+local function ApplyAnimations(humanoid)
+	local animator = humanoid:FindFirstChildOfClass("Animator") or Instance.new("Animator", humanoid)
+	local walkAnim = Instance.new("Animation")
+	walkAnim.AnimationId = "rbxassetid://507777826"
+	local walkTrack = animator:LoadAnimation(walkAnim)
+
+	humanoid.Running:Connect(function(speed)
+		if speed > 0.1 then
+			if not walkTrack.IsPlaying then walkTrack:Play() end
+		else
+			if walkTrack.IsPlaying then walkTrack:Stop() end
+		end
+	end)
+end
+
+local function SmartWalkTo(npc, destinationPos)
+	local humanoid = npc:FindFirstChild("Humanoid")
+	local hrp = npc:FindFirstChild("HumanoidRootPart")
+	if not humanoid or not hrp then return end
+
+	local timeLimit = 15
+	local startTime = os.clock()
+
+	humanoid:MoveTo(destinationPos)
+
+	while os.clock() - startTime < timeLimit do
+		local dist = (hrp.Position - destinationPos).Magnitude
+		if dist < 4 then break end
+		task.wait(0.5)
+	end
+
+	humanoid:MoveTo(hrp.Position)
+end
+
+--------------------------------------------------------------------------------
+-- 4. ORDER GENERATION & INVENTORY VALIDATION
+--------------------------------------------------------------------------------
+local function GenerateRandomOrder()
+	local allItems = {}
+	for key, data in pairs(MenuData.Items) do
+		table.insert(allItems, {Name = key, ToolName = data.ToolName})
+	end
+
+	local order = {}
+	local numItems = math.random(1, 2)
+
+	for i = 1, numItems do
+		local randomIndex = math.random(1, #allItems)
+		table.insert(order, allItems[randomIndex])
+		table.remove(allItems, randomIndex)
+	end
+	return order
+end
+
+local function FormatOrderText(orderList)
+	if #orderList == 1 then
+		return "I would like a " .. orderList[1].Name .. ", please!"
+	else
+		return "Could I get a " .. orderList[1].Name .. " and a " .. orderList[2].Name .. "?"
+	end
+end
+
+local function CheckAndConsumeItems(player, orderList)
+	local foundTools = {}
+
+	for _, item in ipairs(orderList) do
+		local tool = player.Backpack:FindFirstChild(item.ToolName) or (player.Character and player.Character:FindFirstChild(item.ToolName))
+		if tool then
+			table.insert(foundTools, tool)
+		else
+			return false
+		end
+	end
+
+	for _, tool in ipairs(foundTools) do tool:Destroy() end
+	return true
+end
+
+--------------------------------------------------------------------------------
+-- 5. MAIN NPC LIFECYCLE
+--------------------------------------------------------------------------------
+local function ManageRegister(registerPart, spawnPart)
+	task.spawn(function()
+		while true do
+			task.wait(2)
+
+			local userId = GetRandomGroupUserId()
+			local success, npcModel = pcall(function()
+				return Players:CreateHumanoidModelFromUserId(userId, Enum.HumanoidRigType.R15)
+			end)
+
+			if not success or not npcModel then continue end
+
+			local username = "Customer"
+			pcall(function() username = Players:GetNameFromUserIdAsync(userId) end)
+
+			npcModel.Name = "NPC_" .. username
+			npcModel.Parent = Workspace
+			npcModel:MoveTo(spawnPart.Position)
+
+			local hrp = npcModel:WaitForChild("HumanoidRootPart")
+			local humanoid = npcModel:WaitForChild("Humanoid")
+			hrp:SetNetworkOwner(nil)
+			ApplyAnimations(humanoid)
+
+			local statusLabel = CreateOverheadUI(npcModel, username)
+
+			-- Walk to Register
+			SmartWalkTo(npcModel, registerPart.Position)
+			hrp.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(registerPart.Position.X, hrp.Position.Y, registerPart.Position.Z))
+
+			-- Setup Prompts
+			local claimPrompt = Instance.new("ProximityPrompt")
+			claimPrompt.ActionText = "Claim Customer"
+			claimPrompt.ObjectText = username
+			claimPrompt.HoldDuration = 0.5
+			claimPrompt.MaxActivationDistance = 10
+			claimPrompt.RequiresLineOfSight = false
+			claimPrompt.Parent = hrp
+
+			local fulfillPrompt = Instance.new("ProximityPrompt")
+			fulfillPrompt.ActionText = "Give Order"
+			fulfillPrompt.ObjectText = "Awaiting items..."
+			fulfillPrompt.HoldDuration = 1
+			fulfillPrompt.MaxActivationDistance = 10
+			fulfillPrompt.RequiresLineOfSight = false
+			fulfillPrompt.Enabled = false
+			fulfillPrompt.Parent = hrp
+
+			-- State
+			local orderActive = true
+			local claimedBy = nil
+			local currentOrder = GenerateRandomOrder()
+			local orderText = FormatOrderText(currentOrder)
+			local orderCompleted = false
+
+			-- Claim Logic
+			claimPrompt.Triggered:Connect(function(player)
+				-- Rank check
+				if player:GetRankInGroup(MenuData.GroupInfo.GroupId) < MIN_GROUP_RANK then
+					ChatService:Chat(npcModel.Head, "You aren't trained to take orders yet!", Enum.ChatColor.Red)
+					return
+				end
+
+				-- Check if player already claimed another NPC
+				if ActiveClaims[player] then
+					ChatService:Chat(npcModel.Head, "You already have an active customer to serve!", Enum.ChatColor.Red)
+					return
+				end
+
+				claimedBy = player
+				ActiveClaims[player] = npcModel
+				claimPrompt.Enabled = false
+				fulfillPrompt.Enabled = true
+
+				if statusLabel then
+					statusLabel.Text = "Claimed by: " .. player.DisplayName
+					statusLabel.TextColor3 = Color3.fromRGB(90, 255, 140)
+				end
+
+				ChatService:Chat(npcModel.Head, "Hello! " .. orderText, Enum.ChatColor.White)
+
+				-- Send Order Data to Client UI
+				OrderRemote:FireClient(player, "ShowOrder", {
+					CustomerName = username,
+					OrderItems = currentOrder
+				})
+
+				-- Repeat chat prompt
+				task.spawn(function()
+					while orderActive and npcModel.Parent do
+						task.wait(20)
+						if orderActive and claimedBy then
+							ChatService:Chat(npcModel.Head, orderText, Enum.ChatColor.White)
+						end
+					end
+				end)
+
+				-- Player Disconnect / Abandonment check
+				task.spawn(function()
+					while orderActive do
+						task.wait(2)
+						if not claimedBy or not claimedBy.Parent then
+							if claimedBy then ActiveClaims[claimedBy] = nil end
+							claimedBy = nil
+							fulfillPrompt.Enabled = false
+							claimPrompt.Enabled = true
+							if statusLabel then
+								statusLabel.Text = "Waiting for Cashier..."
+								statusLabel.TextColor3 = Color3.fromRGB(255, 200, 50)
+							end
+							ChatService:Chat(npcModel.Head, "My cashier vanished! Can someone else help?", Enum.ChatColor.Red)
+							break
+						end
+					end
+				end)
+			end)
+
+			-- Fulfill Logic
+			fulfillPrompt.Triggered:Connect(function(player)
+				if player ~= claimedBy then
+					ChatService:Chat(npcModel.Head, "I'm waiting for " .. claimedBy.DisplayName .. "!", Enum.ChatColor.Red)
+					return
+				end
+
+				local hasItems = CheckAndConsumeItems(player, currentOrder)
+
+				if hasItems then
+					orderActive = false
+					fulfillPrompt.Enabled = false
+					orderCompleted = true
+					ActiveClaims[player] = nil
+
+					-- Hide Client UI
+					OrderRemote:FireClient(player, "HideOrder")
+
+					if statusLabel then
+						statusLabel.Text = "Leaving..."
+						statusLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+					end
+
+					ChatService:Chat(npcModel.Head, "This looks delicious, thank you!", Enum.ChatColor.Green)
+
+					-- Dynamic XP Calculation (2 XP for 1 item, 5 XP for 2 items)
+					local xpToGive = (#currentOrder == 2) and 5 or 2
+
+					local leaderstats = player:FindFirstChild("leaderstats")
+					if leaderstats then
+						local xp = leaderstats:FindFirstChild("XP")
+						if xp then xp.Value = xp.Value + xpToGive end
+					end
+				else
+					ChatService:Chat(npcModel.Head, "You don't have my complete order! " .. orderText, Enum.ChatColor.Red)
+				end
+			end)
+
+			-- Timeout handler (180s)
+			local timeWaited = 0
+			while not orderCompleted and timeWaited < 180 do
+				task.wait(1)
+				timeWaited += 1
+			end
+
+			if not orderCompleted then
+				orderActive = false
+				claimPrompt.Enabled = false
+				fulfillPrompt.Enabled = false
+
+				if claimedBy then
+					ActiveClaims[claimedBy] = nil
+					OrderRemote:FireClient(claimedBy, "HideOrder")
+				end
+
+				if statusLabel then
+					statusLabel.Text = "Left angry!"
+					statusLabel.TextColor3 = Color3.fromRGB(255, 70, 70)
+				end
+
+				ChatService:Chat(npcModel.Head, "I've been waiting for way too long. I'm leaving!", Enum.ChatColor.Red)
+			end
+
+			-- Walk away & cleanup
+			task.wait(2)
+			SmartWalkTo(npcModel, spawnPart.Position)
+			npcModel:Destroy()
+		end
+	end)
+end
+
+--------------------------------------------------------------------------------
+-- 6. STARTUP
+--------------------------------------------------------------------------------
+task.wait(3)
+
+-- Handle player leaving to clear active claims
+Players.PlayerRemoving:Connect(function(player)
+	ActiveClaims[player] = nil
+end)
+
+local NPCSpawn = Workspace:FindFirstChild("NPCSPAWN")
+if not NPCSpawn then
+	warn("[NPC System] FATAL: Could not find 'NPCSPAWN' in Workspace!")
+else
+	for _, part in ipairs(Workspace:GetDescendants()) do
+		if part:IsA("BasePart") and part.Name:match("^NPC%d+$") then
+			print("[NPC System] Found register part:", part.Name)
+			ManageRegister(part, NPCSpawn)
+		end
+	end
+end
