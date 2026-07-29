@@ -1,0 +1,1134 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+local MenuData = require(ReplicatedStorage:WaitForChild("MenuData"))
+local Remotes = ReplicatedStorage:WaitForChild("CafeRemotes")
+
+local RegisterActionRemote = Remotes:WaitForChild("RegisterAction")
+local SubmitOrderRemote = Remotes:WaitForChild("SubmitOrder")
+local CustomerDecisionRemote = Remotes:WaitForChild("CustomerDecision")
+local BaristaActionRemote = Remotes:WaitForChild("BaristaAction")
+local ClaimPickupRemote = Remotes:WaitForChild("ClaimPickup")
+local AdminDeleteOrderRemote = Remotes:WaitForChild("AdminDeleteOrder")
+local XPNotificationRemote = Remotes:WaitForChild("XPNotification")
+local UpdateBoardsRemote = Remotes:WaitForChild("UpdateBoards")
+local GiveToolRemote = Remotes:WaitForChild("GiveTool")
+local GetLogsFunction = Remotes:WaitForChild("GetLogs")
+local RequestInitialBoards = Remotes:WaitForChild("RequestInitialBoards")
+
+--------------------------------------------------------------------------------
+-- UI UTILITY HELPERS
+--------------------------------------------------------------------------------
+local function ApplyCorner(parent, px)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, px or 8)
+	c.Parent = parent
+	return c
+end
+
+local function ApplyStroke(parent, col, thick)
+	local s = Instance.new("UIStroke")
+	s.Color = col or Color3.fromRGB(45, 45, 45)
+	s.Thickness = thick or 1
+	s.Parent = parent
+	return s
+end
+
+--------------------------------------------------------------------------------
+-- NOTIFICATION SYSTEM (Scaled & Docked Bottom-Right)
+--------------------------------------------------------------------------------
+local function CreateNotification(title, text, duration)
+	local notifGui = PlayerGui:FindFirstChild("CafeNotificationGui")
+	if not notifGui then
+		notifGui = Instance.new("ScreenGui") 
+		notifGui.Name = "CafeNotificationGui"
+		notifGui.ResetOnSpawn = false
+		notifGui.Parent = PlayerGui
+	end
+
+	local container = notifGui:FindFirstChild("Container")
+	if not container then
+		container = Instance.new("Frame")
+		container.Name = "Container"
+		container.AnchorPoint = Vector2.new(1, 1)
+		container.Size = UDim2.new(0.3, 0, 0.7, 0)
+		container.Position = UDim2.new(1, -15, 1, -15)
+		container.BackgroundTransparency = 1
+		container.Parent = notifGui
+
+		local sizeConstraint = Instance.new("UISizeConstraint")
+		sizeConstraint.MaxSize = Vector2.new(280, 9999)
+		sizeConstraint.MinSize = Vector2.new(180, 0)
+		sizeConstraint.Parent = container
+
+		local list = Instance.new("UIListLayout")
+		list.SortOrder = Enum.SortOrder.LayoutOrder
+		list.Padding = UDim.new(0, 8)
+		list.VerticalAlignment = Enum.VerticalAlignment.Bottom
+		list.Parent = container
+	end
+
+	local card = Instance.new("Frame")
+	card.Size = UDim2.new(1, 0, 0, 60)
+	card.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+	card.BorderSizePixel = 0
+	card.Parent = container
+	ApplyCorner(card, 8)
+	ApplyStroke(card, Color3.fromRGB(50, 50, 50), 1)
+
+	local titleLabel = Instance.new("TextLabel")
+	titleLabel.Size = UDim2.new(1, -20, 0, 18)
+	titleLabel.Position = UDim2.new(0, 10, 0, 8)
+	titleLabel.BackgroundTransparency = 1
+	titleLabel.Font = Enum.Font.GothamBold
+	titleLabel.TextColor3 = Color3.fromRGB(250, 250, 250)
+	titleLabel.TextSize = 12
+	titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+	titleLabel.Text = title
+	titleLabel.Parent = card
+
+	local bodyLabel = Instance.new("TextLabel") 
+	bodyLabel.Size = UDim2.new(1, -20, 0, 28)
+	bodyLabel.Position = UDim2.new(0, 10, 0, 26)
+	bodyLabel.BackgroundTransparency = 1
+	bodyLabel.Font = Enum.Font.Gotham
+	bodyLabel.TextColor3 = Color3.fromRGB(170, 170, 170)
+	bodyLabel.TextSize = 10
+	bodyLabel.TextXAlignment = Enum.TextXAlignment.Left
+	bodyLabel.TextWrapped = true
+	bodyLabel.Text = text
+	bodyLabel.Parent = card
+
+	task.delay(duration or 4, function()
+		TweenService:Create(card, TweenInfo.new(0.3), {BackgroundTransparency = 1}):Play()
+		TweenService:Create(titleLabel, TweenInfo.new(0.3), {TextTransparency = 1}):Play()
+		TweenService:Create(bodyLabel, TweenInfo.new(0.3), {TextTransparency = 1}):Play()
+		task.wait(0.35)
+		card:Destroy()
+	end)
+end
+XPNotificationRemote.OnClientEvent:Connect(CreateNotification)
+
+--------------------------------------------------------------------------------
+-- MAIN SCREEN GUI & CASHIER POS UI
+--------------------------------------------------------------------------------
+local MainScreenGui = Instance.new("ScreenGui")
+MainScreenGui.Name = "CafeSystemGui"
+MainScreenGui.ResetOnSpawn = false
+MainScreenGui.Parent = PlayerGui
+
+local PosFrame = Instance.new("Frame")
+PosFrame.Name = "PosFrame"
+PosFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+PosFrame.Size = UDim2.new(0.8, 0, 0.8, 0)
+PosFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+PosFrame.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
+PosFrame.Visible = false
+PosFrame.Parent = MainScreenGui
+ApplyCorner(PosFrame, 12)
+ApplyStroke(PosFrame, Color3.fromRGB(35, 35, 35), 1.5)
+
+local AspectRatio = Instance.new("UIAspectRatioConstraint")
+AspectRatio.AspectRatio = 1.6
+AspectRatio.AspectType = Enum.AspectType.FitWithinMaxSize 
+AspectRatio.DominantAxis = Enum.DominantAxis.Width
+AspectRatio.Parent = PosFrame
+
+-- Header
+local PosHeader = Instance.new("Frame")
+PosHeader.Size = UDim2.new(1, 0, 0, 45)
+PosHeader.BackgroundTransparency = 1
+PosHeader.Parent = PosFrame
+
+local PosTitle = Instance.new("TextLabel")
+PosTitle.Size = UDim2.new(0.5, 0, 1, 0)
+PosTitle.Position = UDim2.new(0, 20, 0, 0)
+PosTitle.BackgroundTransparency = 1
+PosTitle.Font = Enum.Font.GothamBold
+PosTitle.Text = "CASHIER REGISTRATION POS"
+PosTitle.TextColor3 = Color3.fromRGB(240, 240, 240)
+PosTitle.TextSize = 16
+PosTitle.TextXAlignment = Enum.TextXAlignment.Left
+PosTitle.Parent = PosHeader
+
+local UnclaimBtn = Instance.new("TextButton")
+UnclaimBtn.AnchorPoint = Vector2.new(1, 0.5)
+UnclaimBtn.Size = UDim2.new(0, 140, 0, 30)
+UnclaimBtn.Position = UDim2.new(1, -20, 0.5, 0)
+UnclaimBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+UnclaimBtn.Font = Enum.Font.GothamBold
+UnclaimBtn.Text = "UNCLAIM REGISTER"
+UnclaimBtn.TextColor3 = Color3.fromRGB(255, 90, 90)
+UnclaimBtn.TextSize = 11
+UnclaimBtn.Parent = PosHeader
+ApplyCorner(UnclaimBtn, 6)
+ApplyStroke(UnclaimBtn, Color3.fromRGB(45, 45, 45), 1)
+
+-- Customer Selection View
+local CustomerSelectPanel = Instance.new("Frame")
+CustomerSelectPanel.Size = UDim2.new(1, -40, 1, -70)
+CustomerSelectPanel.Position = UDim2.new(0, 20, 0, 55)
+CustomerSelectPanel.BackgroundTransparency = 1
+CustomerSelectPanel.Parent = PosFrame
+
+local CustSearch = Instance.new("TextBox")
+CustSearch.Size = UDim2.new(1, 0, 0, 35)
+CustSearch.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+CustSearch.Font = Enum.Font.Gotham
+CustSearch.PlaceholderText = "Type customer name to filter..."
+CustSearch.Text = "Type customer name to filter..."
+CustSearch.TextColor3 = Color3.fromRGB(240, 240, 240)
+CustSearch.TextSize = 12
+CustSearch.TextXAlignment = Enum.TextXAlignment.Left 
+CustSearch.Parent = CustomerSelectPanel
+ApplyCorner(CustSearch, 8)
+ApplyStroke(CustSearch, Color3.fromRGB(35, 35, 35), 1)
+
+local CustScroll = Instance.new("ScrollingFrame")
+CustScroll.Size = UDim2.new(1, 0, 1, -45)
+CustScroll.Position = UDim2.new(0, 0, 0, 45)
+CustScroll.BackgroundTransparency = 1
+CustScroll.ScrollBarThickness = 4
+CustScroll.Parent = CustomerSelectPanel
+
+local CustGrid = Instance.new("UIGridLayout")
+CustGrid.CellSize = UDim2.new(0.23, 0, 0, 55)
+CustGrid.CellPadding = UDim2.new(0.02, 0, 0, 10)
+CustGrid.Parent = CustScroll
+
+-- Main Order Panel
+local OrderMainPanel = Instance.new("Frame")
+OrderMainPanel.Size = UDim2.new(1, -40, 1, -70)
+OrderMainPanel.Position = UDim2.new(0, 20, 0, 55)
+OrderMainPanel.BackgroundTransparency = 1
+OrderMainPanel.Visible = false
+OrderMainPanel.Parent = PosFrame
+
+local LeftCol = Instance.new("Frame")
+LeftCol.Size = UDim2.new(0.65, -10, 1, 0)
+LeftCol.BackgroundTransparency = 1
+LeftCol.Parent = OrderMainPanel
+
+local CatBar = Instance.new("ScrollingFrame")
+CatBar.Size = UDim2.new(1, 0, 0, 32)
+CatBar.BackgroundTransparency = 1
+CatBar.CanvasSize = UDim2.new(2, 0, 0, 0)
+CatBar.ScrollBarThickness = 0
+CatBar.Parent = LeftCol
+
+local CatList = Instance.new("UIListLayout")
+CatList.FillDirection = Enum.FillDirection.Horizontal
+CatList.Padding = UDim.new(0, 8)
+CatList.Parent = CatBar
+
+local ItemsScroll = Instance.new("ScrollingFrame")
+ItemsScroll.Size = UDim2.new(1, 0, 1, -40)
+ItemsScroll.Position = UDim2.new(0, 0, 0, 40)
+ItemsScroll.BackgroundTransparency = 1
+ItemsScroll.ScrollBarThickness = 4
+ItemsScroll.Parent = LeftCol
+
+local ItemsGrid = Instance.new("UIGridLayout")
+ItemsGrid.CellSize = UDim2.new(0.3, 0, 0, 80)
+ItemsGrid.CellPadding = UDim2.new(0.03, 0, 0, 10) 
+ItemsGrid.Parent = ItemsScroll
+
+local RightCol = Instance.new("Frame")
+RightCol.Size = UDim2.new(0.35, -10, 1, 0)
+RightCol.Position = UDim2.new(0.65, 10, 0, 0)
+RightCol.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+RightCol.Parent = OrderMainPanel
+ApplyCorner(RightCol, 10)
+ApplyStroke(RightCol, Color3.fromRGB(30, 30, 30), 1)
+
+local SelectedCustLabel = Instance.new("TextLabel")
+SelectedCustLabel.Size = UDim2.new(1, -20, 0, 30)
+SelectedCustLabel.Position = UDim2.new(0, 10, 0, 8)
+SelectedCustLabel.BackgroundTransparency = 1
+SelectedCustLabel.Font = Enum.Font.GothamBold
+SelectedCustLabel.Text = "Customer: None"
+SelectedCustLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
+SelectedCustLabel.TextSize = 12
+SelectedCustLabel.TextXAlignment = Enum.TextXAlignment.Left
+SelectedCustLabel.Parent = RightCol
+
+local BasketScroll = Instance.new("ScrollingFrame")
+BasketScroll.Size = UDim2.new(1, -20, 1, -95)
+BasketScroll.Position = UDim2.new(0, 10, 0, 40)
+BasketScroll.BackgroundTransparency = 1
+BasketScroll.ScrollBarThickness = 2
+BasketScroll.Parent = RightCol
+
+local BasketList = Instance.new("UIListLayout")
+BasketList.Padding = UDim.new(0, 6)
+BasketList.Parent = BasketScroll
+
+local SubmitBtn = Instance.new("TextButton")
+SubmitBtn.Size = UDim2.new(1, -20, 0, 38)
+SubmitBtn.Position = UDim2.new(0, 10, 1, -48)
+SubmitBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+SubmitBtn.Font = Enum.Font.GothamBold
+SubmitBtn.Text = "SUBMIT ORDER (0/5)"
+SubmitBtn.TextColor3 = Color3.fromRGB(250, 250, 250)
+SubmitBtn.TextSize = 12
+SubmitBtn.Parent = RightCol
+ApplyCorner(SubmitBtn, 8)
+ApplyStroke(SubmitBtn, Color3.fromRGB(45, 45, 45), 1)
+
+--------------------------------------------------------------------------------
+-- ITEM CUSTOMIZATION MODAL (Types & Temp Selection Fix)
+--------------------------------------------------------------------------------
+local CustomModal = Instance.new("Frame")
+CustomModal.AnchorPoint = Vector2.new(0.5, 0.5) 
+CustomModal.Size = UDim2.new(0, 320, 0, 280)
+CustomModal.Position = UDim2.new(0.5, 0, 0.5, 0)
+CustomModal.BackgroundColor3 = Color3.fromRGB(12, 12, 12)
+CustomModal.Visible = false
+CustomModal.ZIndex = 10
+CustomModal.Parent = PosFrame
+ApplyCorner(CustomModal, 10)
+ApplyStroke(CustomModal, Color3.fromRGB(60, 60, 60), 2)
+
+local ModalTitle = Instance.new("TextLabel")
+ModalTitle.Size = UDim2.new(1, -20, 0, 30)
+ModalTitle.Position = UDim2.new(0, 10, 0, 10)
+ModalTitle.BackgroundTransparency = 1
+ModalTitle.Font = Enum.Font.GothamBold
+ModalTitle.TextColor3 = Color3.fromRGB(240, 240, 240)
+ModalTitle.TextSize = 13
+ModalTitle.ZIndex = 11
+ModalTitle.Parent = CustomModal
+
+local TypeContainer = Instance.new("Frame")
+TypeContainer.Size = UDim2.new(1, -20, 0, 65)
+TypeContainer.Position = UDim2.new(0, 10, 0, 45)
+TypeContainer.BackgroundTransparency = 1
+TypeContainer.ZIndex = 11
+TypeContainer.Parent = CustomModal
+
+local TypeLayout = Instance.new("UIGridLayout")
+TypeLayout.CellSize = UDim2.new(0.3, 0, 0, 28)
+TypeLayout.CellPadding = UDim2.new(0.03, 0, 0, 5)
+TypeLayout.Parent = TypeContainer
+
+local TempContainer = Instance.new("Frame")
+TempContainer.Size = UDim2.new(1, -20, 0, 65)
+TempContainer.Position = UDim2.new(0, 10, 0, 120)
+TempContainer.BackgroundTransparency = 1
+TempContainer.ZIndex = 11
+TempContainer.Parent = CustomModal
+
+local TempLayout = Instance.new("UIGridLayout")
+TempLayout.CellSize = UDim2.new(0.3, 0, 0, 28)
+TempLayout.CellPadding = UDim2.new(0.03, 0, 0, 5)
+TempLayout.Parent = TempContainer
+
+local AddToBasketBtn = Instance.new("TextButton")
+AddToBasketBtn.Size = UDim2.new(1, -20, 0, 36)
+AddToBasketBtn.Position = UDim2.new(0, 10, 1, -45)
+AddToBasketBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+AddToBasketBtn.Font = Enum.Font.GothamBold
+AddToBasketBtn.Text = "ADD TO BASKET"
+AddToBasketBtn.TextColor3 = Color3.fromRGB(250, 250, 250) 
+AddToBasketBtn.TextSize = 11
+AddToBasketBtn.ZIndex = 11
+AddToBasketBtn.Parent = CustomModal
+ApplyCorner(AddToBasketBtn, 6)
+
+local SelectedCustomerPlayer = nil
+local CurrentOrderBasket = {}
+local SelectedItemData = nil
+local SelectedTypeChoice = ""
+local SelectedTempChoice = ""
+
+local function RenderBasket()
+	for _, child in ipairs(BasketScroll:GetChildren()) do
+		if child:IsA("Frame") then child:Destroy() end
+	end
+	for idx, item in ipairs(CurrentOrderBasket) do
+		local card = Instance.new("Frame")
+		card.Size = UDim2.new(1, 0, 0, 32)
+		card.BackgroundColor3 = Color3.fromRGB(22, 22, 22)
+		card.Parent = BasketScroll
+		ApplyCorner(card, 6)
+
+		local txt = Instance.new("TextLabel")
+		txt.Size = UDim2.new(1, -30, 1, 0)
+		txt.Position = UDim2.new(0, 8, 0, 0)
+		txt.BackgroundTransparency = 1
+		txt.Font = Enum.Font.Gotham
+		txt.Text = item.Name .. " (" .. item.Type .. " - " .. item.Temp .. ")"
+		txt.TextColor3 = Color3.fromRGB(200, 200, 200)
+		txt.TextSize = 10
+		txt.TextXAlignment = Enum.TextXAlignment.Left
+		txt.Parent = card
+
+		local removeBtn = Instance.new("TextButton")
+		removeBtn.Size = UDim2.new(0, 20, 0, 20)
+		removeBtn.Position = UDim2.new(1, -24, 0.5, -10)
+		removeBtn.BackgroundTransparency = 1
+		removeBtn.Font = Enum.Font.GothamBold
+		removeBtn.Text = "✕"
+		removeBtn.TextColor3 = Color3.fromRGB(255, 90, 90)
+		removeBtn.TextSize = 11
+		removeBtn.Parent = card
+		removeBtn.MouseButton1Click:Connect(function()
+			table.remove(CurrentOrderBasket, idx)
+			RenderBasket()
+		end)
+	end 
+	SubmitBtn.Text = string.format("SUBMIT ORDER (%d/5)", #CurrentOrderBasket)
+end
+
+local function OpenCustomizer(itemName, itemInfo)
+	SelectedItemData = { Name = itemName, Info = itemInfo }
+	SelectedTypeChoice = itemInfo.Types[1] or "Standard"
+	SelectedTempChoice = itemInfo.Temperatures[1] or "Standard"
+	ModalTitle.Text = "Options: " .. itemName
+	CustomModal.Visible = true
+
+	local function RenderTypeButtons()
+		for _, v in ipairs(TypeContainer:GetChildren()) do 
+			if v:IsA("TextButton") then v:Destroy() end 
+		end
+		for _, tName in ipairs(itemInfo.Types) do
+			local btn = Instance.new("TextButton")
+			btn.BackgroundColor3 = (tName == SelectedTypeChoice) and Color3.fromRGB(70, 70, 70) or Color3.fromRGB(22, 22, 22)
+			btn.Font = Enum.Font.Gotham
+			btn.Text = tName
+			btn.TextColor3 = Color3.fromRGB(220, 220, 220)
+			btn.TextSize = 10
+			btn.ZIndex = 12
+			btn.Parent = TypeContainer
+			ApplyCorner(btn, 4)
+			btn.MouseButton1Click:Connect(function()
+				SelectedTypeChoice = tName
+				RenderTypeButtons()
+			end)
+		end
+	end
+
+	local function RenderTempButtons()
+		for _, v in ipairs(TempContainer:GetChildren()) do 
+			if v:IsA("TextButton") then v:Destroy() end 
+		end
+		for _, tempName in ipairs(itemInfo.Temperatures) do
+			local btn = Instance.new("TextButton")
+			btn.BackgroundColor3 = (tempName == SelectedTempChoice) and Color3.fromRGB(70, 70, 70) or Color3.fromRGB(22, 22, 22)
+			btn.Font = Enum.Font.Gotham
+			btn.Text = tempName
+			btn.TextColor3 = Color3.fromRGB(220, 220, 220)
+			btn.TextSize = 10
+			btn.ZIndex = 12
+			btn.Parent = TempContainer
+			ApplyCorner(btn, 4) 
+			btn.MouseButton1Click:Connect(function()
+				SelectedTempChoice = tempName
+				RenderTempButtons()
+			end)
+		end
+	end
+	RenderTypeButtons()
+	RenderTempButtons()
+end
+
+AddToBasketBtn.MouseButton1Click:Connect(function()
+	if #CurrentOrderBasket >= 5 then
+		CreateNotification("Order Max", "Basket maximum reached (5 items)!")
+		CustomModal.Visible = false
+		return
+	end
+	table.insert(CurrentOrderBasket, {
+		Name = SelectedItemData.Name,
+		Type = SelectedTypeChoice,
+		Temp = SelectedTempChoice
+	})
+	CustomModal.Visible = false
+	RenderBasket()
+end)
+
+local function PopulateMenuCategory(catName)
+	for _, child in ipairs(ItemsScroll:GetChildren()) do
+		if child:IsA("TextButton") then child:Destroy() end
+	end
+	for itemName, itemInfo in pairs(MenuData.Items) do
+		if itemInfo.Category == catName then
+			local btn = Instance.new("TextButton")
+			btn.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+			btn.Font = Enum.Font.GothamBold
+			btn.Text = itemName
+			btn.TextColor3 = Color3.fromRGB(220, 220, 220)
+			btn.TextSize = 11
+			btn.Parent = ItemsScroll
+			ApplyCorner(btn, 8)
+			ApplyStroke(btn, Color3.fromRGB(30, 30, 30), 1)
+			btn.MouseButton1Click:Connect(function()
+				OpenCustomizer(itemName, itemInfo)
+			end)
+		end
+	end
+end 
+
+local function InitMenuCategories()
+	for _, child in ipairs(CatBar:GetChildren()) do
+		if child:IsA("TextButton") then child:Destroy() end
+	end
+	for idx, catName in ipairs(MenuData.Categories) do
+		local btn = Instance.new("TextButton")
+		btn.Size = UDim2.new(0, 90, 1, 0)
+		btn.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+		btn.Font = Enum.Font.GothamBold
+		btn.Text = catName
+		btn.TextColor3 = Color3.fromRGB(200, 200, 200)
+		btn.TextSize = 10
+		btn.Parent = CatBar
+		ApplyCorner(btn, 6)
+		btn.MouseButton1Click:Connect(function()
+			PopulateMenuCategory(catName)
+		end)
+		if idx == 1 then PopulateMenuCategory(catName) end
+	end
+end
+
+local function RefreshCustomerList(filter)
+	for _, v in ipairs(CustScroll:GetChildren()) do
+		if v:IsA("Frame") then v:Destroy() end
+	end
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= LocalPlayer then
+			if not filter or filter == "" or string.find(p.Name:lower(), filter:lower()) or string.find(p.DisplayName:lower(), filter:lower()) then
+				local card = Instance.new("Frame")
+				card.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+				card.Parent = CustScroll
+				ApplyCorner(card, 8)
+
+				local nameLbl = Instance.new("TextLabel")
+				nameLbl.Size = UDim2.new(1, -20, 1, 0)
+				nameLbl.Position = UDim2.new(0, 10, 0, 0)
+				nameLbl.BackgroundTransparency = 1
+				nameLbl.Font = Enum.Font.GothamBold
+				nameLbl.Text = p.DisplayName .. "\n(@" .. p.Name .. ")"
+				nameLbl.TextColor3 = Color3.fromRGB(220, 220, 220)
+				nameLbl.TextSize = 11
+				nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+				nameLbl.Parent = card
+
+				local selBtn = Instance.new("TextButton") 
+				selBtn.Size = UDim2.new(1, 0, 1, 0)
+				selBtn.BackgroundTransparency = 1
+				selBtn.Text = ""
+				selBtn.Parent = card
+				selBtn.MouseButton1Click:Connect(function()
+					SelectedCustomerPlayer = p
+					SelectedCustLabel.Text = "Customer: " .. p.DisplayName
+					CustomerSelectPanel.Visible = false
+					OrderMainPanel.Visible = true
+					InitMenuCategories()
+				end)
+			end
+		end
+	end
+end
+
+CustSearch.Changed:Connect(function(prop)
+	if prop == "Text" then RefreshCustomerList(CustSearch.Text) end
+end)
+
+UnclaimBtn.MouseButton1Click:Connect(function()
+	RegisterActionRemote:FireServer("Unclaim")
+	PosFrame.Visible = false
+end)
+
+SubmitBtn.MouseButton1Click:Connect(function()
+	if not SelectedCustomerPlayer then return end
+	if #CurrentOrderBasket == 0 then
+		CreateNotification("Order Empty", "Add an item to basket first!")
+		return
+	end
+	SubmitOrderRemote:FireServer(SelectedCustomerPlayer, CurrentOrderBasket)
+	PosFrame.Visible = false
+	CurrentOrderBasket = {}
+	RenderBasket()
+end)
+
+RegisterActionRemote.OnClientEvent:Connect(function(action, data)
+	if action == "OpenPOS" then
+		PosFrame.Visible = true
+		CustomerSelectPanel.Visible = true
+		OrderMainPanel.Visible = false
+		CustomModal.Visible = false
+		RefreshCustomerList("")
+	elseif action == "ForceClosePOS" then
+		PosFrame.Visible = false 
+	end
+end)
+
+--------------------------------------------------------------------------------
+-- KITCHEN & PICKUP BOARDS (Local Adornments Fixes Clicking Issues)
+--------------------------------------------------------------------------------
+local KBoardPart = workspace:WaitForChild("KitchenOrders", 10)
+local PBoardPart = workspace:WaitForChild("KClaimOrders", 10)
+
+local KitchenGui = Instance.new("SurfaceGui")
+KitchenGui.Name = "KitchenClientGui"
+KitchenGui.Face = Enum.NormalId.Front
+KitchenGui.Adornee = KBoardPart
+KitchenGui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+KitchenGui.PixelsPerStud = 50
+KitchenGui.Parent = PlayerGui
+
+local KContainer = Instance.new("Frame")
+KContainer.Size = UDim2.new(1, 0, 1, 0)
+KContainer.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
+KContainer.Parent = KitchenGui
+
+local KScroll = Instance.new("ScrollingFrame")
+KScroll.Size = UDim2.new(1, -20, 1, -50)
+KScroll.Position = UDim2.new(0, 10, 0, 45)
+KScroll.BackgroundTransparency = 1
+KScroll.Parent = KContainer
+
+local KGrid = Instance.new("UIGridLayout")
+KGrid.CellSize = UDim2.new(0, 260, 0, 170)
+KGrid.CellPadding = UDim2.new(0, 10, 0, 10)
+KGrid.Parent = KScroll
+
+local KHeader = Instance.new("TextLabel")
+KHeader.Size = UDim2.new(1, 0, 0, 35)
+KHeader.Position = UDim2.new(0, 10, 0, 5)
+KHeader.BackgroundTransparency = 1
+KHeader.Font = Enum.Font.GothamBold
+KHeader.Text = "KITCHEN ORDER QUEUE"
+KHeader.TextColor3 = Color3.fromRGB(240, 240, 240)
+KHeader.TextSize = 20
+KHeader.TextXAlignment = Enum.TextXAlignment.Left
+KHeader.Parent = KContainer
+
+local PickupGui = Instance.new("SurfaceGui")
+PickupGui.Name = "PickupClientGui"
+PickupGui.Face = Enum.NormalId.Front
+PickupGui.Adornee = PBoardPart
+PickupGui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+PickupGui.PixelsPerStud = 50
+PickupGui.Parent = PlayerGui 
+
+local PContainer = Instance.new("Frame")
+PContainer.Size = UDim2.new(1, 0, 1, 0)
+PContainer.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
+PContainer.Parent = PickupGui
+
+local PScroll = Instance.new("ScrollingFrame")
+PScroll.Size = UDim2.new(1, -20, 1, -50)
+PScroll.Position = UDim2.new(0, 10, 0, 45)
+PScroll.BackgroundTransparency = 1
+PScroll.Parent = PContainer
+
+local PGrid = Instance.new("UIGridLayout")
+PGrid.CellSize = UDim2.new(0, 240, 0, 150)
+PGrid.CellPadding = UDim2.new(0, 10, 0, 10)
+PGrid.Parent = PScroll
+
+local PHeader = Instance.new("TextLabel")
+PHeader.Size = UDim2.new(1, 0, 0, 35)
+PHeader.Position = UDim2.new(0, 10, 0, 5)
+PHeader.BackgroundTransparency = 1
+PHeader.Font = Enum.Font.GothamBold
+PHeader.Text = "ORDERS READY FOR PICKUP"
+PHeader.TextColor3 = Color3.fromRGB(240, 240, 240)
+PHeader.TextSize = 20
+PHeader.TextXAlignment = Enum.TextXAlignment.Left
+PHeader.Parent = PContainer
+
+local function RenderBoards(ordersTable)
+	for _, v in ipairs(KScroll:GetChildren()) do if v:IsA("Frame") then v:Destroy() end end
+	for _, v in ipairs(PScroll:GetChildren()) do if v:IsA("Frame") then v:Destroy() end end
+
+	for orderId, order in pairs(ordersTable) do
+		if order.Status == "Kitchen" or order.Status == "Preparing" then
+			local card = Instance.new("Frame")
+			card.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+			card.Parent = KScroll
+			ApplyCorner(card, 8)
+
+			local title = Instance.new("TextLabel")
+			title.Size = UDim2.new(1, -10, 0, 25)
+			title.Position = UDim2.new(0, 5, 0, 5)
+			title.BackgroundTransparency = 1
+			title.Font = Enum.Font.GothamBold
+			title.TextColor3 = Color3.fromRGB(255, 255, 255)
+			title.TextSize = 13
+			title.Text = order.Id .. " | " .. order.CustomerName
+			title.Parent = card
+
+			local itemsTxt = ""
+			for _, item in ipairs(order.Items) do 
+				itemsTxt = itemsTxt .. "• " .. item.Name .. " (" .. item.Type .. ")\n"
+			end
+			local body = Instance.new("TextLabel")
+			body.Size = UDim2.new(1, -10, 0, 75)
+			body.Position = UDim2.new(0, 5, 0, 30)
+			body.BackgroundTransparency = 1
+			body.Font = Enum.Font.Gotham
+			body.TextColor3 = Color3.fromRGB(180, 180, 180)
+			body.TextSize = 10
+			body.TextXAlignment = Enum.TextXAlignment.Left
+			body.TextYAlignment = Enum.TextYAlignment.Top
+			body.Text = itemsTxt
+			body.Parent = card
+
+			local btn = Instance.new("TextButton")
+			btn.Size = UDim2.new(1, -10, 0, 30)
+			btn.Position = UDim2.new(0, 5, 1, -35)
+			btn.BackgroundColor3 = order.BaristaName and Color3.fromRGB(40, 40, 40) or Color3.fromRGB(30, 30, 30)
+			btn.Font = Enum.Font.GothamBold
+			btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+			btn.TextSize = 11
+			btn.Text = order.BaristaName and ("Claimed: " .. order.BaristaName) or "CLAIM ORDER"
+			btn.Parent = card
+			ApplyCorner(btn, 6)
+
+			btn.MouseButton1Click:Connect(function()
+				BaristaActionRemote:FireServer("Claim", orderId)
+			end)
+
+		elseif order.Status == "Ready" then
+			local card = Instance.new("Frame")
+			card.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+			card.Parent = PScroll
+			ApplyCorner(card, 8)
+
+			local title = Instance.new("TextLabel")
+			title.Size = UDim2.new(1, -10, 0, 25)
+			title.Position = UDim2.new(0, 5, 0, 5)
+			title.BackgroundTransparency = 1
+			title.Font = Enum.Font.GothamBold
+			title.TextColor3 = Color3.fromRGB(90, 255, 140)
+			title.TextSize = 13
+			title.Text = order.Id .. " - " .. order.CustomerName
+			title.Parent = card 
+
+			local btn = Instance.new("TextButton")
+			btn.Size = UDim2.new(1, -10, 0, 32)
+			btn.Position = UDim2.new(0, 5, 1, -38)
+			btn.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+			btn.Font = Enum.Font.GothamBold
+			btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+			btn.TextSize = 11
+			btn.Text = "CLAIM MY ORDER"
+			btn.Parent = card
+			ApplyCorner(btn, 6)
+
+			btn.MouseButton1Click:Connect(function()
+				ClaimPickupRemote:FireServer(orderId)
+			end)
+		end
+	end
+end
+
+UpdateBoardsRemote.OnClientEvent:Connect(RenderBoards)
+
+task.spawn(function()
+	local ok, res = pcall(function() return RequestInitialBoards:InvokeServer() end)
+	if ok and res then RenderBoards(res) end
+end)
+
+--------------------------------------------------------------------------------
+-- CUSTOMER ORDER RECEIPT
+--------------------------------------------------------------------------------
+local ReceiptFrame = Instance.new("Frame")
+ReceiptFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+ReceiptFrame.Size = UDim2.new(0, 300, 0, 360)
+ReceiptFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+ReceiptFrame.BackgroundColor3 = Color3.fromRGB(12, 12, 12)
+ReceiptFrame.Visible = false
+ReceiptFrame.Parent = MainScreenGui
+ApplyCorner(ReceiptFrame, 12)
+ApplyStroke(ReceiptFrame, Color3.fromRGB(40, 40, 40), 1.5)
+
+local RTitle = Instance.new("TextLabel")
+RTitle.Size = UDim2.new(1, 0, 0, 40)
+RTitle.BackgroundTransparency = 1
+RTitle.Font = Enum.Font.GothamBold
+RTitle.Text = "CONFIRM YOUR ORDER"
+RTitle.TextColor3 = Color3.fromRGB(240, 240, 240)
+RTitle.TextSize = 13
+RTitle.Parent = ReceiptFrame
+
+local RScroll = Instance.new("ScrollingFrame") 
+RScroll.Size = UDim2.new(1, -20, 1, -100)
+RScroll.Position = UDim2.new(0, 10, 0, 45)
+RScroll.BackgroundTransparency = 1
+RScroll.Parent = ReceiptFrame
+
+local RList = Instance.new("UIListLayout")
+RList.Padding = UDim.new(0, 6)
+RList.Parent = RScroll
+
+local AcceptBtn = Instance.new("TextButton")
+AcceptBtn.Size = UDim2.new(0.48, 0, 0, 36)
+AcceptBtn.Position = UDim2.new(0, 10, 1, -45)
+AcceptBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+AcceptBtn.Font = Enum.Font.GothamBold
+AcceptBtn.Text = "ACCEPT"
+AcceptBtn.TextColor3 = Color3.fromRGB(90, 255, 140)
+AcceptBtn.TextSize = 11
+AcceptBtn.Parent = ReceiptFrame
+ApplyCorner(AcceptBtn, 8)
+
+local DeclineBtn = Instance.new("TextButton")
+DeclineBtn.Size = UDim2.new(0.48, 0, 0, 36)
+DeclineBtn.Position = UDim2.new(0.52, 0, 1, -45)
+DeclineBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+DeclineBtn.Font = Enum.Font.GothamBold
+DeclineBtn.Text = "DECLINE"
+DeclineBtn.TextColor3 = Color3.fromRGB(255, 90, 90)
+DeclineBtn.TextSize = 11
+DeclineBtn.Parent = ReceiptFrame
+ApplyCorner(DeclineBtn, 8)
+
+local CurrentActiveReceiptId = nil
+
+CustomerDecisionRemote.OnClientEvent:Connect(function(action, orderData)
+	if action == "PromptReceipt" then
+		CurrentActiveReceiptId = orderData.Id
+		for _, child in ipairs(RScroll:GetChildren()) do
+			if child:IsA("Frame") then child:Destroy() end
+		end
+		for _, item in ipairs(orderData.Items) do
+			local card = Instance.new("Frame")
+			card.Size = UDim2.new(1, 0, 0, 32)
+			card.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+			card.Parent = RScroll
+			ApplyCorner(card, 6)
+
+			local lbl = Instance.new("TextLabel")
+			lbl.Size = UDim2.new(1, -10, 1, 0)
+			lbl.Position = UDim2.new(0, 5, 0, 0) 
+			lbl.BackgroundTransparency = 1
+			lbl.Font = Enum.Font.Gotham
+			lbl.Text = item.Name .. " (" .. item.Type .. " - " .. item.Temp .. ")"
+			lbl.TextColor3 = Color3.fromRGB(200, 200, 200)
+			lbl.TextSize = 10
+			lbl.TextXAlignment = Enum.TextXAlignment.Left
+			lbl.Parent = card
+		end
+		ReceiptFrame.Visible = true
+	end
+end)
+
+AcceptBtn.MouseButton1Click:Connect(function()
+	if CurrentActiveReceiptId then
+		CustomerDecisionRemote:FireServer(CurrentActiveReceiptId, "Accept")
+		ReceiptFrame.Visible = false
+	end
+end)
+
+DeclineBtn.MouseButton1Click:Connect(function()
+	if CurrentActiveReceiptId then
+		CustomerDecisionRemote:FireServer(CurrentActiveReceiptId, "Decline")
+		ReceiptFrame.Visible = false
+	end
+end)
+
+--------------------------------------------------------------------------------
+-- BARISTA ACTIVE TRACKER UI & NAVIGATION (Unified & Respawn Fixed)
+--------------------------------------------------------------------------------
+local BaristaFrame = Instance.new("Frame")
+BaristaFrame.AnchorPoint = Vector2.new(1, 0.5)
+BaristaFrame.Size = UDim2.new(0, 220, 0.4, 0)
+BaristaFrame.Position = UDim2.new(1, -20, 0.5, 0)
+BaristaFrame.BackgroundColor3 = Color3.fromRGB(12, 12, 12)
+BaristaFrame.Visible = false
+BaristaFrame.Parent = MainScreenGui
+
+local BSizeConstr = Instance.new("UISizeConstraint")
+BSizeConstr.MinSize = Vector2.new(180, 260)
+BSizeConstr.Parent = BaristaFrame
+ApplyCorner(BaristaFrame, 10)
+ApplyStroke(BaristaFrame, Color3.fromRGB(40, 40, 40), 1.5)
+
+local BTitle = Instance.new("TextLabel")
+BTitle.Size = UDim2.new(1, -20, 0, 30)
+BTitle.Position = UDim2.new(0, 10, 0, 5)
+BTitle.BackgroundTransparency = 1
+BTitle.Font = Enum.Font.GothamBold
+BTitle.Text = "ACTIVE ORDER TRACKER"
+BTitle.TextColor3 = Color3.fromRGB(240, 240, 240) 
+BTitle.TextSize = 11
+BTitle.Parent = BaristaFrame
+
+local BScroll = Instance.new("ScrollingFrame")
+BScroll.Size = UDim2.new(1, -20, 1, -85)
+BScroll.Position = UDim2.new(0, 10, 0, 38)
+BScroll.BackgroundTransparency = 1
+BScroll.Parent = BaristaFrame
+
+local BList = Instance.new("UIListLayout")
+BList.Padding = UDim.new(0, 5)
+BList.Parent = BScroll
+
+local FinishOrderBtn = Instance.new("TextButton")
+FinishOrderBtn.Size = UDim2.new(1, -20, 0, 34)
+FinishOrderBtn.Position = UDim2.new(0, 10, 1, -40)
+FinishOrderBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+FinishOrderBtn.Font = Enum.Font.GothamBold
+FinishOrderBtn.Text = "FINISH ORDER"
+FinishOrderBtn.TextColor3 = Color3.fromRGB(100, 100, 100)
+FinishOrderBtn.TextSize = 11
+FinishOrderBtn.Parent = BaristaFrame
+ApplyCorner(FinishOrderBtn, 6)
+
+local ActiveTrackedOrder = nil
+
+-- Fixed: Properly re-binds on player respawn so tracker doesn't break
+local function VerifyInventoryCompletion()
+	if not ActiveTrackedOrder then return end
+	local allDone = true
+	for _, item in ipairs(ActiveTrackedOrder.Items) do
+		local hasInBackpack = LocalPlayer:FindFirstChild("Backpack") and LocalPlayer.Backpack:FindFirstChild(item.Name)
+		local hasInChar = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild(item.Name)
+
+		if not hasInBackpack and not hasInChar then
+			allDone = false
+			break
+		end
+	end
+
+	if allDone then
+		FinishOrderBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+		FinishOrderBtn.TextColor3 = Color3.fromRGB(90, 255, 140)
+	else
+		FinishOrderBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+		FinishOrderBtn.TextColor3 = Color3.fromRGB(100, 100, 100)
+	end
+end
+
+local backpackConAdded, backpackConRemoved
+local function BindBackpackEvents()
+	if backpackConAdded then backpackConAdded:Disconnect() end
+	if backpackConRemoved then backpackConRemoved:Disconnect() end
+	local backpack = LocalPlayer:WaitForChild("Backpack", 5)
+	if backpack then
+		backpackConAdded = backpack.ChildAdded:Connect(VerifyInventoryCompletion)
+		backpackConRemoved = backpack.ChildRemoved:Connect(VerifyInventoryCompletion)
+	end
+	VerifyInventoryCompletion()
+end
+LocalPlayer.CharacterAdded:Connect(BindBackpackEvents)
+if LocalPlayer.Character then BindBackpackEvents() end
+
+
+-- Navigation State & Setup
+local activeBeam = nil
+local activeAttachment0 = nil
+local activeAttachment1 = nil
+local checkConnection = nil 
+
+local function clearNavigation()
+	if checkConnection then
+		checkConnection:Disconnect()
+		checkConnection = nil
+	end
+	if activeBeam then
+		activeBeam:Destroy()
+		activeBeam = nil
+	end
+	if activeAttachment0 then
+		activeAttachment0:Destroy()
+		activeAttachment0 = nil
+	end
+	if activeAttachment1 then
+		activeAttachment1:Destroy()
+		activeAttachment1 = nil
+	end
+end
+
+local function drawNavigationBeam(targetPart)
+	clearNavigation()
+	local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+	local rootPart = character:WaitForChild("HumanoidRootPart", 5)
+
+	if not rootPart or not targetPart then return end
+
+	activeAttachment0 = Instance.new("Attachment")
+	activeAttachment0.Name = "NavAttachmentPlayer"
+	activeAttachment0.Parent = rootPart
+
+	activeAttachment1 = Instance.new("Attachment")
+	activeAttachment1.Name = "NavAttachmentTarget"
+	activeAttachment1.Parent = targetPart
+
+	activeBeam = Instance.new("Beam")
+	activeBeam.Name = "OrderNavigationBeam"
+	activeBeam.Attachment0 = activeAttachment0
+	activeBeam.Attachment1 = activeAttachment1
+	activeBeam.FaceCamera = true
+	activeBeam.Width0 = 1.2
+	activeBeam.Width1 = 1.2
+	activeBeam.Color = ColorSequence.new(Color3.fromRGB(255, 204, 102))
+	activeBeam.Texture = "rbxassetid://446111271"
+	activeBeam.TextureSpeed = 2 
+	activeBeam.TextureLength = 4
+	activeBeam.LightEmission = 0.8
+	activeBeam.LightInfluence = 0
+	activeBeam.Parent = character
+
+	checkConnection = RunService.Heartbeat:Connect(function()
+		if not rootPart or not rootPart.Parent or not targetPart or not targetPart.Parent then
+			clearNavigation()
+			return
+		end
+
+		local distance = (rootPart.Position - targetPart.Position).Magnitude
+		if distance <= 6 then
+			clearNavigation()
+		end
+	end)
+end
+
+-- Unified Barista Action Remote Listener
+BaristaActionRemote.OnClientEvent:Connect(function(action, data)
+	if action == "StartTracker" then
+		ActiveTrackedOrder = data
+		BaristaFrame.Visible = true
+		for _, child in ipairs(BScroll:GetChildren()) do
+			if child:IsA("Frame") then child:Destroy() end
+		end
+		for _, item in ipairs(data.Items) do
+			local card = Instance.new("Frame")
+			card.Size = UDim2.new(1, 0, 0, 30)
+			card.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+			card.Parent = BScroll
+			ApplyCorner(card, 4)
+			local lbl = Instance.new("TextLabel")
+			lbl.Size = UDim2.new(1, -10, 1, 0)
+			lbl.Position = UDim2.new(0, 5, 0, 0)
+			lbl.BackgroundTransparency = 1
+			lbl.Font = Enum.Font.Gotham
+			lbl.Text = "• " .. item.Name
+			lbl.TextColor3 = Color3.fromRGB(200, 200, 200)
+			lbl.TextSize = 10
+			lbl.TextXAlignment = Enum.TextXAlignment.Left
+			lbl.Parent = card
+		end
+		VerifyInventoryCompletion()
+
+	elseif action == "ClearTracker" then
+		ActiveTrackedOrder = nil
+		BaristaFrame.Visible = false
+		clearNavigation()
+
+	elseif action == "CreateNavigation" then
+		if typeof(data) == "Instance" and data:IsA("BasePart") then
+			drawNavigationBeam(data)
+		end
+
+	elseif action == "ClearNavigation" then
+		clearNavigation()
+	end
+end)
+
+FinishOrderBtn.MouseButton1Click:Connect(function()
+	if ActiveTrackedOrder then
+		BaristaActionRemote:FireServer("Finish", ActiveTrackedOrder.Id)
+	end
+end)
+
+--------------------------------------------------------------------------------
+-- BARISTA MACHINE CLICK INTERACTION
+--------------------------------------------------------------------------------
+local function SetupMachineInteractions()
+end
+SetupMachineInteractions() 
+
+--------------------------------------------------------------------------------
+-- ADMIN LOGS & CONTROL PANEL (F4 Keybind)
+--------------------------------------------------------------------------------
+local AdminGui = Instance.new("Frame")
+AdminGui.AnchorPoint = Vector2.new(0.5, 0.5)
+AdminGui.Size = UDim2.new(0, 500, 0, 350)
+AdminGui.Position = UDim2.new(0.5, 0, 0.5, 0)
+AdminGui.BackgroundColor3 = Color3.fromRGB(12, 12, 12)
+AdminGui.Visible = false
+AdminGui.Parent = MainScreenGui
+ApplyCorner(AdminGui, 10)
+ApplyStroke(AdminGui, Color3.fromRGB(60, 60, 60), 1.5)
+
+local ATitle = Instance.new("TextLabel")
+ATitle.Size = UDim2.new(1, -20, 0, 35)
+ATitle.Position = UDim2.new(0, 10, 0, 5)
+ATitle.BackgroundTransparency = 1
+ATitle.Font = Enum.Font.GothamBold
+ATitle.Text = "ADMIN ORDER AUDIT LOGS (PRESS F4 TO TOGGLE)"
+ATitle.TextColor3 = Color3.fromRGB(240, 240, 240)
+ATitle.TextSize = 12
+ATitle.TextXAlignment = Enum.TextXAlignment.Left
+ATitle.Parent = AdminGui
+
+local AScroll = Instance.new("ScrollingFrame")
+AScroll.Size = UDim2.new(1, -20, 1, -50)
+AScroll.Position = UDim2.new(0, 10, 0, 40)
+AScroll.BackgroundTransparency = 1
+AScroll.Parent = AdminGui
+
+local AList = Instance.new("UIListLayout")
+AList.Padding = UDim.new(0, 5)
+AList.Parent = AScroll
+
+local function RefreshAdminLogs()
+	for _, child in ipairs(AScroll:GetChildren()) do 
+		if child:IsA("Frame") then child:Destroy() end 
+	end
+	local logs = GetLogsFunction:InvokeServer()
+	if logs then
+		for _, log in ipairs(logs) do
+			local card = Instance.new("Frame")
+			card.Size = UDim2.new(1, 0, 0, 32)
+			card.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+			card.Parent = AScroll
+			ApplyCorner(card, 4)
+
+			local txt = Instance.new("TextLabel")
+			txt.Size = UDim2.new(1, -80, 1, 0) 
+			txt.Position = UDim2.new(0, 8, 0, 0)
+			txt.BackgroundTransparency = 1
+			txt.Font = Enum.Font.Gotham
+			txt.Text = string.format("[%s] Order %s | Cust: %s | Cashier: %s | Status: %s", log.Timestamp, log.Id, log.Customer, log.Cashier, log.Status)
+			txt.TextColor3 = Color3.fromRGB(200, 200, 200)
+			txt.TextSize = 9
+			txt.TextXAlignment = Enum.TextXAlignment.Left
+			txt.Parent = card
+
+			local delBtn = Instance.new("TextButton")
+			delBtn.Size = UDim2.new(0, 65, 0, 22)
+			delBtn.Position = UDim2.new(1, -70, 0.5, -11)
+			delBtn.BackgroundColor3 = Color3.fromRGB(40, 20, 20)
+			delBtn.Font = Enum.Font.GothamBold
+			delBtn.Text = "DELETE"
+			delBtn.TextColor3 = Color3.fromRGB(255, 90, 90)
+			delBtn.TextSize = 9
+			delBtn.Parent = card
+			ApplyCorner(delBtn, 4)
+
+			delBtn.MouseButton1Click:Connect(function()
+				AdminDeleteOrderRemote:FireServer(log.Id)
+				task.wait(0.2)
+				RefreshAdminLogs()
+			end)
+		end
+	end
+end
+
+UserInputService.InputBegan:Connect(function(input, gpe)
+	if not gpe and input.KeyCode == Enum.KeyCode.F4 then
+		AdminGui.Visible = not AdminGui.Visible
+		if AdminGui.Visible then RefreshAdminLogs() end
+	end
+end)
