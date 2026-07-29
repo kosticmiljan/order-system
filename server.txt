@@ -1,0 +1,524 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerStorage = game:GetService("ServerStorage")
+local Workspace = game:GetService("Workspace")
+
+local MenuData = require(ReplicatedStorage:WaitForChild("MenuData"))
+
+--------------------------------------------------------------------------------
+-- AUTO-ENVIRONMENT SETUP (Ensures parts exist so script never breaks)
+--------------------------------------------------------------------------------
+local function EnsureWorkspaceSetup()
+	local setupFolder = Workspace:FindFirstChild("CafeEnvironment")
+	if not setupFolder then
+		setupFolder = Instance.new("Folder")
+		setupFolder.Name = "CafeEnvironment"
+		setupFolder.Parent = Workspace
+	end
+
+	-- Register 1
+	if not Workspace:FindFirstChild("CashierRegisterTrigger") and not setupFolder:FindFirstChild("CashierRegisterTrigger") then
+		local reg = Instance.new("Part")
+		reg.Name = "CashierRegisterTrigger"
+		reg.Size = Vector3.new(2, 2, 2)
+		reg.Position = Vector3.new(0, 5, 0)
+		reg.Anchored = true
+		reg.Color = Color3.fromRGB(80, 80, 80)
+		reg.Material = Enum.Material.SmoothPlastic
+		reg.Parent = setupFolder
+	end
+
+	-- Kitchen Board
+	if not Workspace:FindFirstChild("KitchenOrders") and not setupFolder:FindFirstChild("KitchenOrders") then
+		local kb = Instance.new("Part")
+		kb.Name = "KitchenOrders"
+		kb.Size = Vector3.new(12, 7, 0.5)
+		kb.Position = Vector3.new(-15, 6, 20)
+		kb.Anchored = true
+		kb.Color = Color3.fromRGB(20, 20, 20)
+		kb.Parent = setupFolder
+	end
+
+	-- Customer Pickup Board
+	if not Workspace:FindFirstChild("KClaimOrders") and not setupFolder:FindFirstChild("KClaimOrders") then
+		local pb = Instance.new("Part")
+		pb.Name = "KClaimOrders"
+		pb.Size = Vector3.new(12, 7, 0.5)
+		pb.Position = Vector3.new(15, 6, 20)
+		pb.Anchored = true
+		pb.Color = Color3.fromRGB(20, 20, 20)
+		pb.Parent = setupFolder
+	end
+end
+EnsureWorkspaceSetup()
+
+--------------------------------------------------------------------------------
+-- REMOTES INITIALIZATION
+--------------------------------------------------------------------------------
+local RemotesFolder = ReplicatedStorage:FindFirstChild("CafeRemotes")
+if not RemotesFolder then
+	RemotesFolder = Instance.new("Folder")
+	RemotesFolder.Name = "CafeRemotes"
+	RemotesFolder.Parent = ReplicatedStorage
+end
+
+local function GetOrCreateRemote(class, name)
+	local remote = RemotesFolder:FindFirstChild(name)
+	if not remote then
+		remote = Instance.new(class)
+		remote.Name = name
+		remote.Parent = RemotesFolder
+	end
+	return remote
+end
+
+local RegisterActionRemote = GetOrCreateRemote("RemoteEvent", "RegisterAction")
+local SubmitOrderRemote = GetOrCreateRemote("RemoteEvent", "SubmitOrder")
+local CustomerDecisionRemote = GetOrCreateRemote("RemoteEvent", "CustomerDecision")
+local BaristaActionRemote = GetOrCreateRemote("RemoteEvent", "BaristaAction")
+local ClaimPickupRemote = GetOrCreateRemote("RemoteEvent", "ClaimPickup")
+local AdminDeleteOrderRemote = GetOrCreateRemote("RemoteEvent", "AdminDeleteOrder")
+local XPNotificationRemote = GetOrCreateRemote("RemoteEvent", "XPNotification")
+local UpdateBoardsRemote = GetOrCreateRemote("RemoteEvent", "UpdateBoards")
+local GiveToolRemote = GetOrCreateRemote("RemoteEvent", "GiveTool")
+local GetLogsFunction = GetOrCreateRemote("RemoteFunction", "GetLogs")
+local RequestInitialBoards = GetOrCreateRemote("RemoteFunction", "RequestInitialBoards")
+
+--------------------------------------------------------------------------------
+-- STATE DATA & LEADERSTATS
+--------------------------------------------------------------------------------
+local Registers = {}
+local Orders = {}
+local ActiveCustomers = {}
+local OrderCounter = 1000
+local OrderLogs = {}
+
+local function AddXP(player, amount)
+	if player and player:FindFirstChild("leaderstats") then
+		local xp = player.leaderstats:FindFirstChild("XP")
+		if xp then xp.Value = xp.Value + amount end
+	end
+end
+
+local function AddServedCount(player)
+	if player and player:FindFirstChild("leaderstats") then
+		local served = player.leaderstats:FindFirstChild("Served") or player.leaderstats:FindFirstChild("Orders")
+		if served then served.Value = served.Value + 1 end
+	end
+end
+
+local function NotifyPlayer(player, title, text, duration)
+	if player then
+		XPNotificationRemote:FireClient(player, title, text, duration or 4)
+	end
+end
+
+local function IsAdmin(player)
+	if not player then return false end
+	local success, rank = pcall(function()
+		return player:GetRankInGroup(MenuData.GroupInfo.GroupId)
+	end)
+	if success and rank then
+		return rank >= MenuData.GroupInfo.AdminRank
+	end
+	return player.UserId == game.CreatorId -- Fallback for studio testing / owner
+end
+
+local function LogOrder(order, status)
+	local logEntry = {
+		Id = order.Id,
+		Customer = order.CustomerName,
+		Cashier = order.CashierName,
+		Barista = order.BaristaName or "None",
+		Items = order.Items,
+		Timestamp = os.date("%X"),
+		Status = status
+	}
+	table.insert(OrderLogs, 1, logEntry)
+end
+
+local function BroadcastBoards()
+	UpdateBoardsRemote:FireAllClients(Orders)
+end
+
+RequestInitialBoards.OnServerInvoke = function(player)
+	return Orders
+end
+
+--------------------------------------------------------------------------------
+-- REGISTER MANAGEMENT & 3D BILLBOARDS
+--------------------------------------------------------------------------------
+local function SetupRegisterBillboard(part)
+	if part:FindFirstChild("RegisterStatusBB") then return end
+	local bb = Instance.new("BillboardGui")
+	bb.Name = "RegisterStatusBB"
+	bb.Size = UDim2.new(0, 120, 0, 36)
+	bb.StudsOffset = Vector3.new(0, 2.5, 0)
+	bb.AlwaysOnTop = true
+	bb.MaxDistance = 30
+	bb.ResetOnSpawn = false
+	bb.ClipsDescendants = true
+	bb.Parent = part
+
+	local frame = Instance.new("Frame")
+	frame.Size = UDim2.new(1, 0, 1, 0)
+	frame.BackgroundColor3 = Color3.fromRGB(12, 12, 12)
+	frame.BackgroundTransparency = 0.15
+	frame.BorderSizePixel = 0
+	frame.Parent = bb
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 6)
+	corner.Parent = frame
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(45, 45, 45)
+	stroke.Thickness = 1
+	stroke.Transparency = 0.2
+	stroke.Parent = frame
+
+	local text = Instance.new("TextLabel")
+	text.Name = "StatusText"
+	text.Size = UDim2.new(1, -12, 1, 0)
+	text.Position = UDim2.new(0, 6, 0, 0)
+	text.BackgroundTransparency = 1
+	text.Font = Enum.Font.GothamMedium
+	text.TextColor3 = Color3.fromRGB(90, 255, 140)
+	text.TextSize = 10
+	text.TextScaled = false
+	text.TextWrapped = true
+	text.Text = "REGISTER OPEN"
+	text.Parent = frame
+end
+
+local function UpdateRegisterDisplay(part, cashier)
+	local bb = part:FindFirstChild("RegisterStatusBB")
+	if bb and bb:FindFirstChild("Frame") then
+		local textLabel = bb.Frame:FindFirstChild("StatusText")
+		if textLabel then
+			if cashier then
+				textLabel.Text = "CLAIMED BY:\n" .. cashier.DisplayName
+				textLabel.TextColor3 = Color3.fromRGB(255, 90, 90)
+			else
+				textLabel.Text = "AVAILABLE REGISTER"
+				textLabel.TextColor3 = Color3.fromRGB(90, 255, 140)
+			end
+		end
+	end
+end
+
+local function InitRegisters()
+	for _, part in ipairs(Workspace:GetDescendants()) do
+		if (part.Name == "CashierRegisterTrigger" or part.Name == "CashierRegister Trigger") and part:IsA("BasePart") then
+			Registers[part] = nil
+			SetupRegisterBillboard(part)
+			UpdateRegisterDisplay(part, nil)
+
+			local prompt = part:FindFirstChildOfClass("ProximityPrompt")
+			if not prompt then
+				prompt = Instance.new("ProximityPrompt")
+				prompt.ActionText = "Operate POS"
+				prompt.ObjectText = "Cash Register"
+				prompt.MaxActivationDistance = 8
+				prompt.Parent = part
+			end
+
+			prompt.Triggered:Connect(function(player)
+				if player:GetRankInGroup(MenuData.GroupInfo.GroupId) < 3 then return end
+
+				for regPart, cPlayer in pairs(Registers) do
+					if cPlayer == player and regPart ~= part then
+						NotifyPlayer(player, "Error", "You are already operating another register!")
+						return
+					end
+				end
+
+				if Registers[part] ~= nil and Registers[part] ~= player then
+					NotifyPlayer(player, "Locked", "Register currently operated by " .. Registers[part].DisplayName)
+					return
+				end
+
+				Registers[part] = player
+				UpdateRegisterDisplay(part, player)
+				RegisterActionRemote:FireClient(player, "OpenPOS", { RegisterPart = part })
+			end)
+		end
+	end
+end
+InitRegisters()
+
+local function UnclaimRegister(player)
+	for part, cPlayer in pairs(Registers) do
+		if cPlayer == player then
+			Registers[part] = nil
+			UpdateRegisterDisplay(part, nil)
+			RegisterActionRemote:FireClient(player, "ForceClosePOS")
+			NotifyPlayer(player, "Unclaimed", "You have stepped down from the register.")
+		end
+	end
+end
+
+RegisterActionRemote.OnServerEvent:Connect(function(player, action)
+	if action == "Unclaim" then
+		UnclaimRegister(player)
+	end
+end)
+
+--------------------------------------------------------------------------------
+-- TOOL MACHINE INTERACTION (Allows Barista to make items!)
+--------------------------------------------------------------------------------
+GiveToolRemote.OnServerEvent:Connect(function(player, itemName)
+	local itemData = MenuData.Items[itemName]
+	if not itemData then return end
+
+	local toolName = itemData.ToolName or itemName
+	local existingInBackpack = player.Backpack:FindFirstChild(toolName)
+	local existingInChar = player.Character and player.Character:FindFirstChild(toolName)
+
+	if existingInBackpack or existingInChar then
+		NotifyPlayer(player, "Already Holding", "You already have a " .. toolName .. "!")
+		return
+	end
+
+	-- Try to clone tool from ServerStorage or create a clean placeholder Tool
+	local sourceTool = ServerStorage:FindFirstChild(toolName)
+	local newTool
+
+	if sourceTool and sourceTool:IsA("Tool") then
+		newTool = sourceTool:Clone()
+	else
+		-- Fallback procedural tool creation so system works dynamically
+		newTool = Instance.new("Tool")
+		newTool.Name = toolName
+		newTool.RequiresHandle = true
+
+		local handle = Instance.new("Part")
+		handle.Name = "Handle"
+		handle.Size = Vector3.new(1, 1.2, 1)
+		handle.Color = Color3.fromRGB(130, 80, 40)
+		handle.Material = Enum.Material.SmoothPlastic
+		handle.Parent = newTool
+
+		local bG = Instance.new("BillboardGui")
+		bG.Size = UDim2.new(0, 100, 0, 30)
+		bG.AlwaysOnTop = true
+		bG.StudsOffset = Vector3.new(0, 1.5, 0)
+		bG.Parent = handle
+
+		local txt = Instance.new("TextLabel")
+		txt.Size = UDim2.new(1, 0, 1, 0)
+		txt.BackgroundTransparency = 1
+		txt.Font = Enum.Font.GothamBold
+		txt.TextColor3 = Color3.fromRGB(255, 255, 255)
+		txt.TextSize = 10
+		txt.Text = toolName
+		txt.Parent = bG
+	end
+
+	newTool.Parent = player.Backpack
+	NotifyPlayer(player, "Item Prepared", "Prepared " .. toolName .. "!")
+end)
+
+--------------------------------------------------------------------------------
+-- ORDER LOGIC & WORKFLOW
+--------------------------------------------------------------------------------
+local function GenerateOrderId()
+	OrderCounter = OrderCounter + 1
+	return "#" .. tostring(OrderCounter)
+end
+
+SubmitOrderRemote.OnServerEvent:Connect(function(cashier, customerPlayer, itemsList)
+	if not customerPlayer or #itemsList == 0 or #itemsList > 5 then return end
+	if ActiveCustomers[customerPlayer] then
+		NotifyPlayer(cashier, "Error", "Customer already has a pending order!")
+		return
+	end
+
+	local orderId = GenerateOrderId()
+	local orderData = {
+		Id = orderId,
+		Customer = customerPlayer,
+		CustomerName = customerPlayer.Name,
+		Cashier = cashier,
+		CashierName = cashier.Name,
+		Items = itemsList,
+		Status = "PendingCustomer",
+		Barista = nil,
+		BaristaName = nil
+	}
+
+	Orders[orderId] = orderData
+	ActiveCustomers[customerPlayer] = orderId
+	CustomerDecisionRemote:FireClient(customerPlayer, "PromptReceipt", orderData)
+	NotifyPlayer(cashier, "Sent", "Order sent to " .. customerPlayer.DisplayName .. " for confirmation.")
+end)
+
+CustomerDecisionRemote.OnServerEvent:Connect(function(customer, orderId, decision)
+	local order = Orders[orderId]
+	if not order or order.Customer ~= customer then return end
+
+	if decision == "Accept" then
+		order.Status = "Kitchen"
+		local cashierXP = (#order.Items >= 3) and 3 or 1
+		AddXP(order.Cashier, cashierXP)
+		NotifyPlayer(order.Cashier, "Order Confirmed", "Customer accepted order! +" .. cashierXP .. " XP")
+		NotifyPlayer(customer, "Confirmed", "Your order has been sent to the kitchen queue!")
+		LogOrder(order, "Sent To Kitchen")
+		BroadcastBoards()
+	else
+		NotifyPlayer(order.Cashier, "Declined", customer.DisplayName .. " declined the order.")
+		NotifyPlayer(customer, "Cancelled", "Order cancelled.")
+		ActiveCustomers[customer] = nil
+		Orders[orderId] = nil
+	end
+end)
+
+BaristaActionRemote.OnServerEvent:Connect(function(barista, action, orderId)
+	local order = Orders[orderId]
+	if not order then return end
+
+	if action == "Claim" then
+		if order.Barista ~= nil then
+			NotifyPlayer(barista, "Failed", "Order already claimed by " .. tostring(order.BaristaName))
+			return
+		end
+		order.Barista = barista
+		order.BaristaName = barista.Name
+		order.Status = "Preparing"
+		BroadcastBoards()
+		LogOrder(order, "Claimed")
+		BaristaActionRemote:FireClient(barista, "StartTracker", order)
+		NotifyPlayer(barista, "Claimed", "Started preparing order " .. order.Id)
+
+	elseif action == "Finish" then
+		if order.Barista ~= barista then return end
+
+		-- STRICT INVENTORY CHECK (Backpack + Equipped Character Tool)
+		local missingItems = {}
+		for _, item in ipairs(order.Items) do
+			local toolName = MenuData.Items[item.Name] and MenuData.Items[item.Name].ToolName or item.Name
+			local hasInBackpack = barista.Backpack:FindFirstChild(toolName)
+			local hasInChar = barista.Character and barista.Character:FindFirstChild(toolName)
+
+			if not hasInBackpack and not hasInChar then
+				table.insert(missingItems, toolName)
+			end
+		end
+
+		if #missingItems > 0 then
+			NotifyPlayer(barista, "Missing Items", "You need: " .. table.concat(missingItems, ", ") .. " in your inventory!")
+			return
+		end
+
+		-- Remove items from barista inventory and store them in ready folder
+		local storage = Instance.new("Folder")
+		storage.Name = "StoredOrder_" .. order.Id
+		storage.Parent = ReplicatedStorage
+
+		for _, item in ipairs(order.Items) do
+			local toolName = MenuData.Items[item.Name] and MenuData.Items[item.Name].ToolName or item.Name
+			local itemTool = barista.Backpack:FindFirstChild(toolName) or (barista.Character and barista.Character:FindFirstChild(toolName))
+			if itemTool then
+				itemTool.Parent = storage
+			end
+		end
+
+		order.StorageFolder = storage
+		order.Status = "Ready"
+
+		local baristaXP = math.clamp(#order.Items * 2, 3, 10)
+		AddXP(barista, baristaXP)
+		AddServedCount(barista)
+		NotifyPlayer(barista, "Order Ready", "Order completed! Earned +" .. baristaXP .. " XP.")
+
+		-- PICKUP COUNTER LOCATION
+		local setupFolder = Workspace:FindFirstChild("CafeEnvironment")
+		local pickupPart = Workspace:FindFirstChild("PickupCounter") or Workspace:FindFirstChild("KClaimOrders") or (setupFolder and setupFolder:FindFirstChild("KClaimOrders"))
+
+		if order.Customer then
+			NotifyPlayer(order.Customer, "Order Ready!", "Your order " .. order.Id .. " is ready for pickup at the counter!")
+			-- Send Waypoint navigation command to Customer Client
+			if pickupPart then
+				BaristaActionRemote:FireClient(order.Customer, "CreateNavigation", pickupPart)
+			end
+		end
+
+		BroadcastBoards()
+		LogOrder(order, "Ready For Pickup")
+		BaristaActionRemote:FireClient(barista, "ClearTracker")
+	end
+end)
+
+ClaimPickupRemote.OnServerEvent:Connect(function(customer, orderId)
+	local order = Orders[orderId]
+	if not order or order.Status ~= "Ready" then return end
+
+	if order.Customer ~= customer then
+		NotifyPlayer(customer, "Access Denied", "This order belongs to " .. order.CustomerName .. "!")
+		return
+	end
+
+	-- Give stored tools to customer
+	if order.StorageFolder then
+		for _, tool in ipairs(order.StorageFolder:GetChildren()) do
+			tool.Parent = customer.Backpack
+		end
+		order.StorageFolder:Destroy()
+	end
+
+	ActiveCustomers[customer] = nil
+	Orders[orderId] = nil
+	NotifyPlayer(customer, "Claimed", "Enjoy your items! Thank you for visiting.")
+	BroadcastBoards()
+	LogOrder(order, "Completed")
+end)
+
+--------------------------------------------------------------------------------
+-- ADMIN & CLEANUP LOGIC
+--------------------------------------------------------------------------------
+AdminDeleteOrderRemote.OnServerEvent:Connect(function(player, orderId)
+	if not IsAdmin(player) then
+		NotifyPlayer(player, "Unauthorized", "You lack admin rank to perform this action.")
+		return
+	end
+
+	local order = Orders[orderId]
+	if order then
+		if order.Customer then ActiveCustomers[order.Customer] = nil end
+		if order.StorageFolder then order.StorageFolder:Destroy() end
+		Orders[orderId] = nil
+		BroadcastBoards()
+		NotifyPlayer(player, "Admin Action", "Order " .. orderId .. " force deleted.")
+	end
+end)
+
+GetLogsFunction.OnServerInvoke = function(player)
+	return IsAdmin(player) and OrderLogs or {}
+end
+
+Players.PlayerRemoving:Connect(function(player)
+	UnclaimRegister(player)
+
+	-- Handle Customer Disconnect: Wipe their order instantly
+	local activeOrderId = ActiveCustomers[player]
+	if activeOrderId and Orders[activeOrderId] then
+		local order = Orders[activeOrderId]
+		if order.StorageFolder then order.StorageFolder:Destroy() end
+		Orders[activeOrderId] = nil
+		ActiveCustomers[player] = nil
+		BroadcastBoards()
+	end
+
+	-- Handle Barista Disconnect: Revert order back to Kitchen queue
+	for id, order in pairs(Orders) do
+		if order.Barista == player and order.Status == "Preparing" then
+			order.Barista = nil
+			order.BaristaName = nil
+			order.Status = "Kitchen"
+			if order.Customer then
+				NotifyPlayer(order.Customer, "Queue Update", "Your barista disconnected. Order reassigned to queue!")
+			end
+			BroadcastBoards()
+		end
+	end
+end)
